@@ -74,3 +74,209 @@ async function api(path, options = {}) {
     headers: {
       Authorization: "Bearer " + token,
       Accept: "application/vnd.github+json",
+      ...(options.body ? { "Content-Type": "application/json" } : {})
+    }
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const error = new Error(data.message || "Request failed (" + res.status + ")");
+    error.status = res.status;
+    throw error;
+  }
+  return data;
+}
+
+async function apiAll(path) {
+  const all = [];
+  for (let page = 1; ; page++) {
+    const data = await api(path + (path.includes("?") ? "&" : "?") + "per_page=100&page=" + page);
+    all.push(...data);
+    if (data.length < 100) return all;
+  }
+}
+
+const encodePath = path => path.split("/").map(encodeURIComponent).join("/");
+const setStatus = text => $("status").textContent = text;
+const updateButton = () => $("upload").disabled = busy || !queue.length || !$("repo").value || $("branch").disabled;
+
+function renderRepos() {
+  const term = $("search").value.toLowerCase();
+  const previous = $("repo").value;
+  const matches = repos.filter(r => r.full_name.toLowerCase().includes(term));
+  $("repo").replaceChildren(...matches.map(r => new Option(r.full_name + (r.private ? " (private)" : ""), r.full_name)));
+  if (matches.some(r => r.full_name === previous)) $("repo").value = previous;
+  if ($("repo").value !== previous || !$("branch").options.length) loadBranches();
+}
+
+async function loadBranches() {
+  const request = ++branchRequest;
+  const name = $("repo").value;
+  $("branch").replaceChildren();
+  $("branch").disabled = true;
+  updateButton();
+  if (!name) return;
+  try {
+    const branches = await apiAll("/repos/" + name + "/branches");
+    if (request !== branchRequest) return;
+    const fallback = repos.find(r => r.full_name === name).default_branch;
+    if (branches.length) {
+      $("branch").replaceChildren(...branches.map(b => new Option(b.name, b.name)));
+      if (branches.some(b => b.name === fallback)) $("branch").value = fallback;
+    } else {
+      $("branch").replaceChildren(new Option("(empty repo)", ""));
+    }
+    $("branch").disabled = false;
+    setStatus("");
+  } catch (e) {
+    if (request === branchRequest) setStatus(e.message);
+  }
+  updateButton();
+}
+
+$("load").onclick = async () => {
+  token = $("token").value.trim();
+  if (!token) return setStatus("Enter a token first.");
+  $("load").disabled = true;
+  setStatus("Loading repos...");
+  try {
+    repos = await apiAll("/user/repos?sort=updated");
+    $("panel").hidden = false;
+    $("search").value = "";
+    $("repo").replaceChildren();
+    $("branch").replaceChildren();
+    renderRepos();
+    setStatus("Loaded " + repos.length + " repos.");
+  } catch (e) {
+    $("panel").hidden = true;
+    setStatus(e.message);
+  }
+  $("load").disabled = false;
+};
+
+$("token").onkeydown = e => { if (e.key === "Enter") $("load").click(); };
+$("search").oninput = renderRepos;
+$("repo").onchange = loadBranches;
+
+function addFiles(items) {
+  if (busy) return;
+  for (const { file, path } of items) {
+    queue = queue.filter(q => {
+      if (q.path !== path) return true;
+      q.el.remove();
+      return false;
+    });
+    const el = document.createElement("li");
+    const name = document.createElement("span");
+    const state = document.createElement("span");
+    name.textContent = path;
+    state.textContent = (file.size / 1024).toFixed(1) + " KB";
+    el.append(name, state);
+    $("list").append(el);
+    queue.push({ file, path, el, state });
+  }
+  updateButton();
+}
+
+const fromInput = list => [...list].map(file => ({ file, path: file.webkitRelativePath || file.name }));
+
+async function walk(entry, prefix = "") {
+  if (entry.isFile) {
+    const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+    return [{ file, path: prefix + entry.name }];
+  }
+  const reader = entry.createReader();
+  const results = [];
+  while (true) {
+    const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+    if (!batch.length) return results;
+    for (const child of batch) results.push(...await walk(child, prefix + entry.name + "/"));
+  }
+}
+
+$("drop").onclick = () => $("files").click();
+$("pickFolder").onclick = () => $("dir").click();
+$("files").onchange = e => { addFiles(fromInput(e.target.files)); e.target.value = ""; };
+$("dir").onchange = e => { addFiles(fromInput(e.target.files)); e.target.value = ""; };
+$("clear").onclick = () => {
+  if (busy) return;
+  queue = [];
+  $("list").replaceChildren();
+  updateButton();
+};
+
+window.ondragover = e => e.preventDefault();
+window.ondrop = e => e.preventDefault();
+$("drop").ondragover = e => { e.preventDefault(); $("drop").classList.add("over"); };
+$("drop").ondragleave = () => $("drop").classList.remove("over");
+$("drop").ondrop = async e => {
+  e.preventDefault();
+  $("drop").classList.remove("over");
+  const entries = [...e.dataTransfer.items].map(i => i.webkitGetAsEntry()).filter(Boolean);
+  try {
+    const results = [];
+    for (const entry of entries) results.push(...await walk(entry));
+    addFiles(results);
+  } catch (err) {
+    setStatus("Could not read dropped files: " + err.message);
+  }
+};
+
+const toBase64 = file => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(reader.result.slice(reader.result.indexOf(",") + 1));
+  reader.onerror = () => reject(reader.error);
+  reader.readAsDataURL(file);
+});
+
+async function uploadFile(item, repo, branch, folder, message) {
+  const path = folder ? folder + "/" + item.path : item.path;
+  const url = "/repos/" + repo + "/contents/" + encodePath(path);
+  let sha;
+  try {
+    const existing = await api(url + (branch ? "?ref=" + encodeURIComponent(branch) : ""));
+    sha = existing.sha;
+  } catch (e) {
+    if (e.status !== 404) throw e;
+  }
+  const body = { message: message || "Upload " + path, content: await toBase64(item.file) };
+  if (sha) body.sha = sha;
+  if (branch) body.branch = branch;
+  await api(url, { method: "PUT", body: JSON.stringify(body) });
+}
+
+$("upload").onclick = async () => {
+  const repo = $("repo").value;
+  const branch = $("branch").value;
+  const folder = $("folder").value.trim().replace(/^\/+|\/+$/g, "");
+  const message = $("message").value.trim();
+  const controls = ["load", "search", "repo", "branch", "folder", "message", "pickFolder", "clear"];
+  busy = true;
+  controls.forEach(id => $(id).disabled = true);
+  updateButton();
+  let done = 0;
+  const total = queue.length;
+  for (const item of [...queue]) {
+    item.el.className = "";
+    item.state.textContent = "Uploading...";
+    setStatus("Uploading " + (done + 1) + " of " + total);
+    try {
+      if (item.file.size > 100 * 1024 * 1024) throw new Error("Over 100 MB limit");
+      await uploadFile(item, repo, branch, folder, message);
+      item.el.className = "ok";
+      item.state.textContent = "Done";
+      queue = queue.filter(q => q !== item);
+      done++;
+    } catch (e) {
+      item.el.className = "fail";
+      item.state.textContent = e.message;
+    }
+  }
+  busy = false;
+  controls.forEach(id => $(id).disabled = false);
+  setStatus("Uploaded " + done + " of " + total + " files." + (queue.length ? " Press Upload to retry the rest." : ""));
+  if (!branch && done) loadBranches();
+  updateButton();
+};
+</script>
+</body>
+</html>
