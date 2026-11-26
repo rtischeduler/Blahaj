@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GitHub Uploader</title>
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px 16px; background: #0d1117; color: #e6edf3; font-family: system-ui, sans-serif; }
+main { max-width: 640px; margin: 0 auto; }
+h1 { font-size: 22px; }
+section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+label { display: block; font-size: 13px; color: #8b949e; margin: 12px 0 4px; }
+label:first-child { margin-top: 0; }
+input, select, button { width: 100%; padding: 9px 10px; border-radius: 6px; border: 1px solid #30363d; background: #0d1117; color: #e6edf3; font-size: 14px; }
+button { background: #238636; border-color: #238636; cursor: pointer; margin-top: 12px; font-weight: 600; }
+button:disabled { opacity: 0.5; cursor: default; }
+#drop { border: 2px dashed #30363d; border-radius: 8px; padding: 28px; text-align: center; cursor: pointer; color: #8b949e; margin-top: 12px; }
+#drop.over { border-color: #58a6ff; color: #58a6ff; }
+.row { display: flex; gap: 8px; }
+.row button { background: #21262d; border-color: #30363d; }
+ul { list-style: none; padding: 0; margin: 12px 0 0; font-size: 13px; }
+li { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid #30363d; word-break: break-all; }
+li span:last-child { white-space: nowrap; color: #8b949e; }
+li.ok span:last-child { color: #3fb950; }
+li.fail span:last-child { color: #f85149; white-space: normal; text-align: right; }
+#status { font-size: 13px; color: #8b949e; min-height: 18px; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+<h1>GitHub Uploader</h1>
+<section>
+<label for="token">Personal access token</label>
+<input id="token" type="password" placeholder="ghp_... or github_pat_..." autocomplete="off">
+<button id="load">Load repos</button>
+</section>
+<section id="panel" hidden>
+<label for="search">Search repos</label>
+<input id="search" type="text" placeholder="Filter by name">
+<label for="repo">Repository</label>
+<select id="repo"></select>
+<label for="branch">Branch</label>
+<select id="branch"></select>
+<label for="folder">Target folder (blank for root)</label>
+<input id="folder" type="text" placeholder="assets/js">
+<label for="message">Commit message</label>
+<input id="message" type="text" placeholder="Upload files">
+<div id="drop">Drop files here or click to choose</div>
+<div class="row">
+<button id="pickFolder">Choose folder</button>
+<button id="clear">Clear list</button>
+</div>
+<input id="files" type="file" multiple hidden>
+<input id="dir" type="file" webkitdirectory hidden>
+<ul id="list"></ul>
+<button id="upload" disabled>Upload</button>
+</section>
+<div id="status"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let token = "";
+let repos = [];
+let queue = [];
+let busy = false;
+let branchRequest = 0;
+
+async function api(path, options = {}) {
+  const res = await fetch("https://api.github.com" + path, {
+    ...options,
+    cache: "no-store",
+    headers: {
+      Authorization: "Bearer " + token,
+      Accept: "application/vnd.github+json",
